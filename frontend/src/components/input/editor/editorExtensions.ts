@@ -1,9 +1,9 @@
 import {nextTick, toValue, type MaybeRefOrGetter, type Ref} from 'vue'
 
 import StarterKit from '@tiptap/starter-kit'
-import {createNodeFromContent, Extension, mergeAttributes, type Editor, type Extensions} from '@tiptap/core'
+import {createNodeFromContent, getTextSerializersFromSchema, Extension, mergeAttributes, type Editor, type Extensions} from '@tiptap/core'
 import {Plugin, PluginKey} from '@tiptap/pm/state'
-import {Fragment} from '@tiptap/pm/model'
+import {Fragment, type Node as ProseMirrorNode, type Slice} from '@tiptap/pm/model'
 import {marked} from 'marked'
 
 import Link from '@tiptap/extension-link'
@@ -223,6 +223,60 @@ export function createEditorExtensions(deps: EditorExtensionDeps): Extensions {
 		},
 	})
 
+	function serializeListAwareText(node: ProseMirrorNode, serializers: ReturnType<typeof getTextSerializersFromSchema>): string {
+		if (node.isText) {
+			return node.text ?? ''
+		}
+		const serializer = serializers[node.type.name]
+		if (serializer) {
+			return serializer({node, pos: 0, parent: node, index: 0, range: {from: 0, to: node.nodeSize}})
+		}
+		if (node.type.name === 'hardBreak') {
+			return '\n'
+		}
+		if (node.isLeaf) {
+			return ''
+		}
+
+		const lines: string[] = []
+		node.forEach((child, _offset, index) => {
+			let text = serializeListAwareText(child, serializers)
+			if (node.type.name === 'bulletList') {
+				text = '- ' + text
+			} else if (node.type.name === 'orderedList') {
+				const start = (node.attrs.start as number | undefined) ?? 1
+				text = `${start + index}. ` + text
+			} else if (node.type.name === 'taskList') {
+				text = `- [${child.attrs.checked ? 'x' : ' '}] ` + text
+			}
+			lines.push(text)
+		})
+
+		return lines.join('\n')
+	}
+
+	const PlainTextCopy = Extension.create({
+		name: 'plainTextCopy',
+		// must run before tiptap's built-in clipboard text serializer
+		priority: 1000,
+
+		addProseMirrorPlugins() {
+			const serializers = getTextSerializersFromSchema(this.editor.schema)
+			return [
+				new Plugin({
+					key: new PluginKey('plainTextCopy'),
+					props: {
+						clipboardTextSerializer: (slice: Slice) => {
+							const lines: string[] = []
+							slice.content.forEach(node => lines.push(serializeListAwareText(node, serializers)))
+							return lines.join('\n')
+						},
+					},
+				}),
+			]
+		},
+	})
+
 	const PasteHandler = Extension.create({
 		name: 'pasteHandler',
 
@@ -297,6 +351,7 @@ export function createEditorExtensions(deps: EditorExtensionDeps): Extensions {
 			link: false,
 			underline: false,
 		}),
+		PlainTextCopy,
 		ListKeymapWithJoin,
 		DeleteSelectionBeforeEnter,
 		BlockquoteWithCommentId,
